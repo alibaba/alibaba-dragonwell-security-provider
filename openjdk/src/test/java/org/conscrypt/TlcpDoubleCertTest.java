@@ -28,6 +28,9 @@ import static org.junit.Assert.assertNotNull;
 
 public class TlcpDoubleCertTest {
     private final String TLCP = "TLCP";
+    private final String HTTP_1_1 = "http/1.1";
+    private final String HTTP_2 = "h2";
+    private final String SNI_HOST_NAME = "example.com";
     private final Map<String, Object> CIPHER_SUIT_MAP = new HashMap();
 
     private final String SERVER_ENC_ALIAS = "SERVER_ENC_ENTRY";
@@ -388,5 +391,63 @@ public class TlcpDoubleCertTest {
         downLatch = new CountDownLatch(1);
         startSessionResumptionServer();
         startSessionResumptionClient();
+    }
+
+    @Test
+    public void testTlcpCertSNIAndAlpn() throws Exception {
+        downLatch = new CountDownLatch(1);
+        SSLContext sslContextServer = SSLContext.getInstance(TLCP, new DragonwellSecurityProvider());
+        assertTrue(sslContextServer.getProtocol().equals("TLCP"));
+        sslContextServer.init(serverKeyManager, serverTrustManager, new SecureRandom());
+        SSLServerSocketFactory serverFactory = sslContextServer.getServerSocketFactory();
+        SSLServerSocket svrSocket = (SSLServerSocket) serverFactory.createServerSocket(0);
+        port = svrSocket.getLocalPort();
+
+        Thread serverThread = new Thread(() -> {
+            try {
+                downLatch.countDown();
+                for (int i = 0x0; i < 1; i++) {
+                    SSLSocket sslSocket = (SSLSocket) svrSocket.accept();
+                    Conscrypt.setApplicationProtocols(sslSocket, new String[] {HTTP_2});
+                    BufferedReader ioReader = new BufferedReader(new InputStreamReader(sslSocket.getInputStream()));
+                    PrintWriter ioWriter = new PrintWriter(sslSocket.getOutputStream());
+                    SSLSession session = (SSLSession) sslSocket.getClass().getSuperclass().getDeclaredMethod("getActiveSession").invoke(sslSocket);
+                    String hostname = (String) session.getClass().getDeclaredMethod("getRequestedServerName").invoke(session);
+                    assertEquals(hostname, SNI_HOST_NAME);
+                    String tmpMsg = ioReader.readLine();
+                    if (tmpMsg != null) {
+                        assertEquals(tmpMsg, HELLO_REQUEST);
+                        ioWriter.println(HELLO_RESPONSE);
+                        ioWriter.flush();
+                        Thread.sleep(1_000);
+                    }
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+                assertTrue(false);
+            }
+        });
+        serverThread.setDaemon(true);
+        serverThread.start();
+
+        SSLContext sslContextClient = SSLContext.getInstance(TLCP, new DragonwellSecurityProvider());
+        sslContextClient.init(clientKeyManager, clientTrustManager, new SecureRandom());
+        SSLSocketFactory sslCntFactory = sslContextClient.getSocketFactory();
+        SSLSocket sslSocket = (SSLSocket) sslCntFactory.createSocket("localhost", port);
+        Conscrypt.setHostname(sslSocket, SNI_HOST_NAME);
+        Conscrypt.setApplicationProtocols(sslSocket, new String[] {HTTP_1_1, HTTP_2});
+
+        downLatch.await();
+        // Wait for server startup.
+        Thread.sleep(2_000);
+        BufferedReader ioReader = new BufferedReader(new InputStreamReader(
+                sslSocket.getInputStream()));
+        PrintWriter ioWriter = new PrintWriter(sslSocket.getOutputStream());
+        ioWriter.println(HELLO_REQUEST);
+        ioWriter.flush();
+        assertEquals(ioReader.readLine(), HELLO_RESPONSE);
+        assertEquals(Conscrypt.getApplicationProtocol(sslSocket), HTTP_2);
+        Thread.sleep(2_000);
+        sslSocket.close();
     }
 }
